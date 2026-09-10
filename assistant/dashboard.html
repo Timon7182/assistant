@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ассистент у входа</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --text:#1c1f24; --muted:#6b7280; --line:#e5e7eb; --accent:#2563eb; --ok:#16a34a; --warn:#d97706; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#111418; --card:#1a1f26; --text:#e6e8eb; --muted:#9aa3ad; --line:#2a313b; } }
+  * { box-sizing:border-box }
+  body { margin:0; font:14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; background:var(--bg); color:var(--text) }
+  header { display:flex; align-items:center; gap:16px; padding:12px 20px; border-bottom:1px solid var(--line); background:var(--card); position:sticky; top:0 }
+  header h1 { font-size:16px; margin:0 12px 0 0 }
+  nav button { background:none; border:none; padding:8px 12px; color:var(--muted); cursor:pointer; border-radius:6px; font-size:14px }
+  nav button.active { color:var(--accent); background:color-mix(in srgb, var(--accent) 10%, transparent) }
+  #status { margin-left:auto; color:var(--muted); font-size:12px }
+  main { max-width:1100px; margin:0 auto; padding:20px }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:14px 16px; margin-bottom:10px }
+  .row { display:flex; gap:14px; align-items:flex-start }
+  .row img { width:96px; height:72px; object-fit:cover; border-radius:6px; background:#000; flex:none }
+  .meta { color:var(--muted); font-size:12px }
+  .name { font-weight:600 }
+  .badge { display:inline-block; padding:1px 8px; border-radius:999px; font-size:11px; background:var(--line); color:var(--muted); margin-left:6px }
+  .badge.pending { background:color-mix(in srgb, var(--warn) 15%, transparent); color:var(--warn) }
+  .badge.delivered, .badge.done { background:color-mix(in srgb, var(--ok) 15%, transparent); color:var(--ok) }
+  .msgs { margin-top:10px; border-top:1px solid var(--line); padding-top:10px; display:none }
+  .msg { margin:4px 0; padding:6px 10px; border-radius:8px; max-width:80% }
+  .msg.user { background:color-mix(in srgb, var(--accent) 12%, transparent) }
+  .msg.assistant { background:var(--line); margin-left:auto }
+  .msg .t { color:var(--muted); font-size:11px; margin-right:6px }
+  .act { font-family:ui-monospace, monospace; font-size:12px; color:var(--muted); margin:4px 0 }
+  a.btn, button.btn { font-size:12px; color:var(--accent); background:none; border:1px solid var(--line); border-radius:6px; padding:3px 8px; cursor:pointer }
+  ul.facts { margin:6px 0 0; padding-left:18px; color:var(--muted) }
+  .empty { color:var(--muted); padding:30px; text-align:center }
+  table { width:100%; border-collapse:collapse } td, th { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); vertical-align:top } th { color:var(--muted); font-weight:500; font-size:12px }
+</style>
+</head>
+<body>
+<header>
+  <h1>Ассистент у входа</h1>
+  <nav>
+    <button data-tab="visits" class="active">Визиты</button>
+    <button data-tab="people">Люди</button>
+    <button data-tab="tasks">Поручения</button>
+    <button data-tab="notes">Заметки</button>
+    <button data-tab="actions">Журнал</button>
+  </nav>
+  <span id="status"></span>
+</header>
+<main id="main"><div class="empty">Загрузка…</div></main>
+<script>
+const $ = s => document.querySelector(s);
+let tab = 'visits', open = new Set();
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const fmt = ts => ts ? ts.replace('T', ' ').slice(0, 16) : '';
+const dur = (a, b) => { if (!a || !b) return 'идёт'; const s = (new Date(b) - new Date(a)) / 1000; return s < 60 ? Math.round(s) + ' с' : Math.round(s / 60) + ' мин'; };
+async function api(p, opt) { const r = await fetch(p, opt); if (r.status === 401) { location.reload(); } return r.json(); }
+document.querySelectorAll('nav button').forEach(b => b.onclick = () => { tab = b.dataset.tab; document.querySelectorAll('nav button').forEach(x => x.classList.toggle('active', x === b)); render(); });
+
+async function render() {
+  const main = $('#main');
+  try {
+    if (tab === 'visits') {
+      const v = await api('/api/visits');
+      main.innerHTML = v.length ? v.map(x => `
+        <div class="card" data-id="${x.id}">
+          <div class="row">
+            <img src="/api/visits/${x.id}/snapshot" onerror="this.style.visibility='hidden'">
+            <div style="flex:1">
+              <div><span class="name">${esc(x.name || 'Незнакомец')}</span><span class="badge">${dur(x.started, x.ended)}</span></div>
+              <div class="meta">${fmt(x.started)}${x.ended ? ' – ' + x.ended.slice(11, 16) : ''}</div>
+              <div style="margin-top:6px">${esc(x.summary || '')}</div>
+              <div style="margin-top:8px"><button class="btn" onclick="toggle(${x.id})">${open.has(x.id) ? 'Скрыть' : 'Транскрипт'}</button></div>
+            </div>
+          </div>
+          <div class="msgs" id="m${x.id}" style="display:${open.has(x.id) ? 'block' : 'none'}"></div>
+        </div>`).join('') : '<div class="empty">Визитов пока нет</div>';
+      for (const id of open) loadVisit(id);
+    } else if (tab === 'people') {
+      const p = await api('/api/people');
+      main.innerHTML = p.length ? p.map(x => `
+        <div class="card">
+          <div class="row"><div style="flex:1">
+            <span class="name">${esc(x.name)}</span><span class="badge">${x.visits} визит.</span>
+            <div class="meta">последний раз ${fmt(x.last_seen)} · знаком с ${fmt(x.created)}</div>
+            ${x.facts.length ? '<ul class="facts">' + x.facts.map(f => '<li>' + esc(f) + '</li>').join('') + '</ul>' : '<div class="meta">фактов пока нет</div>'}
+          </div>
+          <button class="btn" onclick="forget(${x.id}, '${esc(x.name)}')">Забыть</button></div>
+        </div>`).join('') : '<div class="empty">Ассистент пока никого не знает</div>';
+    } else if (tab === 'tasks') {
+      const t = await api('/api/tasks');
+      main.innerHTML = t.length ? '<div class="card"><table><tr><th>Когда</th><th>От кого</th><th>Кому</th><th>Что</th><th>Статус</th><th></th></tr>' + t.map(x => `
+        <tr><td class="meta">${fmt(x.created)}</td><td>${esc(x.from_name || '—')}</td><td>${esc(x.to_name)}</td><td>${esc(x.text)}</td>
+        <td><span class="badge ${x.status}">${x.status}${x.delivered_at ? ' ' + x.delivered_at.slice(5, 16).replace('T', ' ') : ''}</span></td>
+        <td>${x.status !== 'done' ? `<button class="btn" onclick="setStatus(${x.id},'done')">Готово</button>` : ''}</td></tr>`).join('') + '</table></div>' : '<div class="empty">Поручений нет</div>';
+    } else if (tab === 'notes') {
+      const n = await api('/api/notes');
+      main.innerHTML = n.length ? '<div class="card"><table><tr><th>Когда</th><th>Кто</th><th>Заметка</th></tr>' + n.map(x => `<tr><td class="meta">${fmt(x.created)}</td><td>${esc(x.person_name || '—')}</td><td>${esc(x.text)}</td></tr>`).join('') + '</table></div>' : '<div class="empty">Заметок нет</div>';
+    } else {
+      const a = await api('/api/actions');
+      main.innerHTML = a.length ? '<div class="card"><table><tr><th>Когда</th><th>Кто</th><th>Инструмент</th><th>Аргументы</th><th>Результат</th></tr>' + a.map(x => `<tr><td class="meta">${fmt(x.ts)}</td><td>${esc(x.name || '—')}</td><td>${esc(x.tool)}</td><td class="act">${esc(x.args)}</td><td>${esc(x.result)}</td></tr>`).join('') + '</table></div>' : '<div class="empty">Журнал пуст</div>';
+    }
+    $('#status').textContent = 'обновлено ' + new Date().toLocaleTimeString();
+  } catch (e) { $('#status').textContent = 'ошибка: ' + e; }
+}
+async function loadVisit(id) {
+  const v = await api('/api/visits/' + id), el = $('#m' + id); if (!el) return;
+  el.innerHTML = (v.messages.map(m => `<div class="msg ${m.role}"><span class="t">${m.ts.slice(11, 16)}</span>${esc(m.content)}</div>`).join('') || '<div class="meta">реплик нет</div>')
+    + v.actions.map(a => `<div class="act">⚙ ${esc(a.tool)} ${esc(a.args)} → ${esc(a.result)}</div>`).join('');
+}
+function toggle(id) { open.has(id) ? open.delete(id) : open.add(id); render(); }
+async function forget(id, name) { if (confirm('Забыть ' + name + '? Лицо и факты будут удалены.')) { await api('/api/people/' + id, { method: 'DELETE' }); render(); } }
+async function setStatus(id, status) { await api('/api/tasks/' + id + '/status', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status }) }); render(); }
+render(); setInterval(render, 7000);
+</script>
+</body>
+</html>

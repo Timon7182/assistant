@@ -8,12 +8,15 @@ import cv2, numpy as np, sounddevice as sd, websocket
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--server", default="ws://192.168.88.49:8060/ws/edge")
+ap.add_argument("--key", default="", help="API_KEY сервера")
 ap.add_argument("--camera", type=int, default=0)
 ap.add_argument("--fps", type=float, default=2.0, help="кадров в секунду на сервер")
 ap.add_argument("--mic", default=None, help="индекс/имя микрофона (см. python -m sounddevice)")
 ap.add_argument("--speaker", default=None)
 ap.add_argument("--show", action="store_true", help="показывать окно с камерой")
 args = ap.parse_args()
+if args.key:
+    args.server += ("&" if "?" in args.server else "?") + "key=" + args.key
 
 SR = 16000
 CHUNK = 480                                  # 30 мс - то, что ждёт webrtcvad на сервере
@@ -42,6 +45,8 @@ def on_message(_, msg):
         print(f"[you] {d['text']}")
     elif t == "status":
         print(f"[status] {d}")
+    elif t == "end":
+        print("[session ended]")
 
 
 def play_wav(data):

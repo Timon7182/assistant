@@ -1,0 +1,7 @@
+[Unit]
+Description=door-assistant auto deploy from GitHub
+After=docker.service network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/assistant/deploy/deploy.sh

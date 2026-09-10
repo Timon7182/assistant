@@ -4,24 +4,33 @@ services:
     container_name: door-assistant
     restart: unless-stopped
     ports:
-      - "8060:8060"
+      - "${PORT:-8060}:8060"
+    env_file:
+      - path: .env
+        required: false
     environment:
-      LLM_URL: http://192.168.88.49:8050/v1
-      LLM_MODEL: current-LLM
-      LLM_API_KEY: none
-      WHISPER_MODEL: small            # small | medium | large-v3-turbo (CPU: small ~1s на фразу, medium ~3s)
-      PIPER_VOICE: ru_RU-irina-medium # ru_RU-dmitri-medium, ru_RU-ruslan-medium, ru_RU-denis-medium
-      FACE_THRESHOLD: "0.45"          # косинус, выше = строже
-      ASSISTANT_NAME: "Ассистент UCO"
-      TZ: Asia/Almaty
-      OMP_NUM_THREADS: "8"
+      API_KEY: ${API_KEY:-}
+      DASH_USER: ${DASH_USER:-admin}
+      DASH_PASSWORD: ${DASH_PASSWORD:-}
+      CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
+      CLAUDE_MODEL: ${CLAUDE_MODEL:-sonnet}
+      LLM_PROVIDER: ${LLM_PROVIDER:-}
+      LLM_URL: ${LLM_URL:-http://192.168.88.49:8050/v1}
+      LLM_MODEL: ${LLM_MODEL:-current-LLM}
+      WHISPER_MODEL: ${WHISPER_MODEL:-small}
+      PIPER_VOICE: ${PIPER_VOICE:-ru_RU-irina-medium}
+      FACE_THRESHOLD: ${FACE_THRESHOLD:-0.45}
+      ASSISTANT_NAME: ${ASSISTANT_NAME:-Ассистент UCO}
+      RETENTION_DAYS: ${RETENTION_DAYS:-90}
+      TZ: ${TZ:-Asia/Almaty}
+      OMP_NUM_THREADS: ${OMP_THREADS:-4}
     volumes:
       - assistant-data:/data
     deploy:
       resources:
         limits:
-          cpus: "12"
-          memory: 8g
+          cpus: "${CPU_LIMIT:-4}"
+          memory: ${MEM_LIMIT:-4g}
 
 volumes:
   assistant-data:
