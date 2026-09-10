@@ -2,6 +2,8 @@
 # Автодеплой: подтягивает main из GitHub и пересобирает контейнер, если появились новые коммиты.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+exec 9>/tmp/assistant-deploy.lock
+flock -n 9 || exit 0          # сборка уже идёт
 LOG=deploy.log
 git fetch -q origin main
 LOCAL=$(git rev-parse HEAD); REMOTE=$(git rev-parse origin/main)
