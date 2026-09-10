@@ -89,10 +89,14 @@ async function render() {
         </div>`).join('') : '<div class="empty">Ассистент пока никого не знает</div>';
     } else if (tab === 'tasks') {
       const t = await api('/api/tasks');
-      main.innerHTML = t.length ? '<div class="card"><table><tr><th>Когда</th><th>От кого</th><th>Кому</th><th>Что</th><th>Статус</th><th></th></tr>' + t.map(x => `
+      const form = `<div class="card"><form onsubmit="return addTask(this)" style="display:flex;gap:8px;flex-wrap:wrap">
+        <input name="to" placeholder="Кому (имя)" required style="padding:6px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--text)">
+        <input name="text" placeholder="Что передать" required style="flex:1;min-width:220px;padding:6px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--text)">
+        <button class="btn" type="submit">Передать при встрече</button></form></div>`;
+      main.innerHTML = form + (t.length ? '<div class="card"><table><tr><th>Когда</th><th>От кого</th><th>Кому</th><th>Что</th><th>Статус</th><th></th></tr>' + t.map(x => `
         <tr><td class="meta">${fmt(x.created)}</td><td>${esc(x.from_name || '—')}</td><td>${esc(x.to_name)}</td><td>${esc(x.text)}</td>
         <td><span class="badge ${x.status}">${x.status}${x.delivered_at ? ' ' + x.delivered_at.slice(5, 16).replace('T', ' ') : ''}</span></td>
-        <td>${x.status !== 'done' ? `<button class="btn" onclick="setStatus(${x.id},'done')">Готово</button>` : ''}</td></tr>`).join('') + '</table></div>' : '<div class="empty">Поручений нет</div>';
+        <td>${x.status !== 'done' ? `<button class="btn" onclick="setStatus(${x.id},'done')">Готово</button>` : ''}</td></tr>`).join('') + '</table></div>' : '<div class="empty">Поручений нет</div>');
     } else if (tab === 'notes') {
       const n = await api('/api/notes');
       main.innerHTML = n.length ? '<div class="card"><table><tr><th>Когда</th><th>Кто</th><th>Заметка</th></tr>' + n.map(x => `<tr><td class="meta">${fmt(x.created)}</td><td>${esc(x.person_name || '—')}</td><td>${esc(x.text)}</td></tr>`).join('') + '</table></div>' : '<div class="empty">Заметок нет</div>';
@@ -110,6 +114,7 @@ async function loadVisit(id) {
 }
 function toggle(id) { open.has(id) ? open.delete(id) : open.add(id); render(); }
 async function forget(id, name) { if (confirm('Забыть ' + name + '? Лицо и факты будут удалены.')) { await api('/api/people/' + id, { method: 'DELETE' }); render(); } }
+async function addTask(f) { api('/api/tasks', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ to_name: f.to.value, text: f.text.value }) }).then(() => { f.reset(); render(); }); return false; }
 async function setStatus(id, status) { await api('/api/tasks/' + id + '/status', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status }) }); render(); }
 render(); setInterval(render, 7000);
 </script>

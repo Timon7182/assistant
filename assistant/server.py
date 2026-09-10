@@ -763,6 +763,16 @@ def api_tasks():
     return q("SELECT * FROM tasks ORDER BY id DESC LIMIT 200")
 
 
+@app.post("/api/tasks", dependencies=[Depends(auth)])
+async def api_task_create(req: Request):
+    """Оставить поручение из дашборда: {"to_name": "...", "text": "...", "from_name": "admin"}"""
+    b = await req.json()
+    to = find_person_by_name(b.get("to_name", ""))
+    tid = ex("INSERT INTO tasks(from_person, from_name, to_person, to_name, text, created) VALUES(?,?,?,?,?,?)",
+             None, b.get("from_name") or DASH_USER, to["id"] if to else None, (to["name"] if to else b.get("to_name", "")).strip(), b.get("text", ""), now())
+    return {"id": tid, "to_known": bool(to)}
+
+
 @app.post("/api/tasks/{tid}/status", dependencies=[Depends(auth)])
 async def api_task_status(tid: int, req: Request):
     status = (await req.json()).get("status", "done")
