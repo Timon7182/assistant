@@ -4,4 +4,4 @@ After=docker.service network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=/opt/assistant/deploy/deploy.sh
+ExecStart=/bin/bash /opt/assistant/deploy/deploy.sh
