@@ -1,0 +1,27 @@
+services:
+  assistant:
+    build: ./assistant
+    container_name: door-assistant
+    restart: unless-stopped
+    ports:
+      - "8060:8060"
+    environment:
+      LLM_URL: http://192.168.88.49:8050/v1
+      LLM_MODEL: current-LLM
+      LLM_API_KEY: none
+      WHISPER_MODEL: small            # small | medium | large-v3-turbo (CPU: small ~1s на фразу, medium ~3s)
+      PIPER_VOICE: ru_RU-irina-medium # ru_RU-dmitri-medium, ru_RU-ruslan-medium, ru_RU-denis-medium
+      FACE_THRESHOLD: "0.45"          # косинус, выше = строже
+      ASSISTANT_NAME: "Ассистент UCO"
+      TZ: Asia/Almaty
+      OMP_NUM_THREADS: "8"
+    volumes:
+      - assistant-data:/data
+    deploy:
+      resources:
+        limits:
+          cpus: "12"
+          memory: 8g
+
+volumes:
+  assistant-data:
