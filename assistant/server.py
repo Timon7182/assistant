@@ -5,7 +5,7 @@ Edge client connects to /ws/edge?key=API_KEY and sends:
   text        {"type":"text","text":"..."}          debug input without a mic
   text        {"type":"wake","source":"voice|hotkey","word":"..."}   summon without a face (wake word / hot key)
   binary      int16 PCM mono 16 kHz, 480 samples (30 ms) per message
-Server sends: {"type":"say","text","wav"}, {"type":"heard","text"}, {"type":"status",...}, {"type":"end"}
+Server sends: {"type":"say","text","wav"}, {"type":"heard","text"}, {"type":"status",...}, {"type":"vad","state":"start|stop|cancel"}, {"type":"end"}
 
 HTTP API (X-API-Key header, Bearer token, or Basic auth with DASH_USER/DASH_PASSWORD):
   /v1/audio/transcriptions, /v1/audio/speech   OpenAI-compatible STT/TTS
@@ -547,6 +547,7 @@ class Session:
                 self.in_speech = True
                 self.speech = list(self.prebuf)
                 self.silence = 0
+                self.notify("start")           # recording a phrase
             return
         self.speech.append(pcm)
         self.silence = 0 if voiced else self.silence + 1
@@ -555,9 +556,18 @@ class Session:
             self.ring.clear()
             self.prebuf.clear()
             if len(chunks) < 15:
+                self.notify("cancel")
                 return
+            self.notify("stop")                # phrase captured, transcribing
             audio = np.frombuffer(b"".join(chunks), np.int16).astype(np.float32) / 32768.0
             asyncio.create_task(self.on_utterance(audio))
+
+    def notify(self, state):
+        """{"type":"vad","state":"start|stop|cancel"} so the edge can beep / show that it is listening"""
+        try:
+            asyncio.get_event_loop().create_task(self.send({"type": "vad", "state": state}))
+        except Exception:
+            pass
 
     async def on_utterance(self, audio):
         if self.busy.locked():

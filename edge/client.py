@@ -22,7 +22,7 @@ ap.add_argument("--show", action="store_true", help="показывать окн
 ap.add_argument("--hotkey", default="ctrl+alt+a", help="горячая клавиша вызова; '' = выключить")
 ap.add_argument("--wake", default="", help="слово-активатор, например 'ассистент' (распознаётся локально)")
 ap.add_argument("--wake-model", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "models", "vosk-model-small-ru-0.22"))
-ap.add_argument("--beep", action="store_true", help="короткий сигнал при вызове")
+ap.add_argument("--no-beep", action="store_true", help="не подавать звуковые сигналы (услышал / записал)")
 args = ap.parse_args()
 if args.key:
     args.server += ("&" if "?" in args.server else "?") + "key=" + args.key
@@ -62,6 +62,14 @@ def on_message(_, msg):
         print(f"[you] {d['text']}")
     elif t == "status":
         print(f"[status] {d}")
+    elif t == "vad":
+        st = d.get("state")
+        if st == "start":
+            print("[listening...]")
+        elif st == "stop":
+            print("[processing]")
+            if time.time() - last_wake < 180 and not args.no_beep:
+                threading.Thread(target=beep, args=("done",), daemon=True).start()
     elif t == "end":
         print("[session ended]")
 
@@ -78,12 +86,23 @@ def play_wav(data):
         playing.clear()
 
 
-def beep():
-    t = np.arange(int(SR * 0.12)) / SR
-    tone = (np.sin(2 * np.pi * 880 * t) * 8000 * np.minimum(1, 10 * (0.12 - t))).astype(np.int16)
+def tone(freq, dur, vol=6000):
+    t = np.arange(int(SR * dur)) / SR
+    env = np.minimum(1, np.minimum(t, dur - t) * 100)          # 10 ms fade in/out, no click
+    return (np.sin(2 * np.pi * freq * t) * vol * env).astype(np.int16)
+
+
+def beep(kind="wake"):
+    """wake: one short rising blip = услышал, говори. done: two blips = фразу записал, обрабатываю."""
+    if kind == "wake":
+        pcm = np.concatenate([tone(660, 0.07), tone(990, 0.09)])
+        sd.play(pcm, SR, device=args.speaker)     # mic is NOT muted: the person may already be talking
+        sd.wait()
+        return
+    pcm = np.concatenate([tone(880, 0.07), np.zeros(int(SR * 0.05), np.int16), tone(880, 0.07)])
     playing.set()
     try:
-        sd.play(tone, SR, device=args.speaker)
+        sd.play(pcm, SR, device=args.speaker)
         sd.wait()
     finally:
         playing.clear()
@@ -96,8 +115,8 @@ def wake(source):
         return
     last_wake = time.time()
     print(f"[wake] {source}")
-    if args.beep:
-        threading.Thread(target=beep, daemon=True).start()
+    if not args.no_beep:
+        threading.Thread(target=beep, args=("wake",), daemon=True).start()
     if connected():
         try:
             send_text({"type": "wake", "source": source, "word": args.wake})
