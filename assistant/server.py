@@ -72,7 +72,9 @@ log.info("models ready, llm provider=%s", LLM_PROVIDER)
 # ----------------------------------------------------------------- storage
 DB_PATH = f"{DATA}/assistant.sqlite"
 SNAP_DIR = f"{DATA}/snapshots"
+FACE_DIR = f"{DATA}/faces"          # one face crop per person, shown in the dashboard
 os.makedirs(SNAP_DIR, exist_ok=True)
+os.makedirs(FACE_DIR, exist_ok=True)
 db_lock = threading.Lock()
 
 
@@ -179,9 +181,30 @@ def next_guest_name():
     return f"Гость {n}"
 
 
-def create_person(name, emb):
+def save_face(pid, jpeg, bbox):
+    """crop the face (with margin) out of the frame and keep it as the person's photo"""
+    try:
+        img = cv2.imdecode(np.frombuffer(jpeg, np.uint8), cv2.IMREAD_COLOR)
+        h, w = img.shape[:2]
+        x1, y1, x2, y2 = bbox
+        mx, my = int((x2 - x1) * 0.45), int((y2 - y1) * 0.55)
+        x1, y1, x2, y2 = max(0, x1 - mx), max(0, y1 - my), min(w, x2 + mx), min(h, y2 + my)
+        crop = img[y1:y2, x1:x2]
+        if crop.size == 0:
+            return
+        if max(crop.shape[:2]) > 400:
+            k = 400 / max(crop.shape[:2])
+            crop = cv2.resize(crop, (int(crop.shape[1] * k), int(crop.shape[0] * k)))
+        cv2.imwrite(f"{FACE_DIR}/{pid}.jpg", crop, [cv2.IMWRITE_JPEG_QUALITY, 88])
+    except Exception as e:
+        log.warning("save_face failed: %s", e)
+
+
+def create_person(name, emb, jpeg=None, bbox=None):
     pid = ex("INSERT INTO persons(name, created, last_seen, visits) VALUES(?,?,?,1)", name, now(), now())
     index.add(pid, emb)
+    if jpeg is not None and bbox:
+        save_face(pid, jpeg, bbox)
     return pid
 
 
@@ -397,6 +420,7 @@ class Session:
         self.pending_emb = None
         self.pending_area = 0
         self.pending_frame = None
+        self.pending_bbox = None
         self.state = "idle"                    # idle | awaiting_name | ended
         self.history = []
         self.last_face_ts = 0.0
@@ -475,7 +499,7 @@ class Session:
         else:
             self.unknown_hits += 1
             if f["score"] > 0.7 and (self.pending_emb is None or f["area"] > self.pending_area):
-                self.pending_emb, self.pending_area, self.pending_frame = f["emb"], f["area"], jpeg
+                self.pending_emb, self.pending_area, self.pending_frame, self.pending_bbox = f["emb"], f["area"], jpeg, f["bbox"]
             if self.person is None and self.state == "idle" and self.unknown_hits >= 3:
                 await self.on_unknown()
 
@@ -515,7 +539,7 @@ class Session:
             if self.pending_emb is None:
                 return
             name = next_guest_name()
-            pid = create_person(name, self.pending_emb)
+            pid = create_person(name, self.pending_emb, self.pending_frame, self.pending_bbox)
             self.person = get_person(pid)
             self.pending_emb = None
             self.history = []
@@ -661,7 +685,7 @@ class Session:
         if self.pending_emb is None:
             await self.say("Посмотри, пожалуйста, в камеру, я не вижу лица.")
             return
-        pid = create_person(name, self.pending_emb)
+        pid = create_person(name, self.pending_emb, self.pending_frame, self.pending_bbox)
         self.person = get_person(pid)
         self.state = "idle"
         self.pending_emb = None
@@ -903,7 +927,21 @@ def api_delete_person(pid: int):
     ex("DELETE FROM persons WHERE id=?", pid)
     ex("DELETE FROM embeddings WHERE person_id=?", pid)
     index.reload()
+    if os.path.exists(f"{FACE_DIR}/{pid}.jpg"):
+        os.remove(f"{FACE_DIR}/{pid}.jpg")
     return {"deleted": pid}
+
+
+@app.get("/api/people/{pid}/photo", dependencies=[Depends(auth)])
+def api_person_photo(pid: int):
+    """face crop saved at enrolment; falls back to the latest visit snapshot"""
+    path = f"{FACE_DIR}/{pid}.jpg"
+    if not os.path.exists(path):
+        v = q("SELECT snapshot FROM visits WHERE person_id=? AND snapshot IS NOT NULL ORDER BY id DESC LIMIT 1", pid)
+        if not v or not os.path.exists(v[0]["snapshot"]):
+            raise HTTPException(404)
+        path = v[0]["snapshot"]
+    return FileResponse(path, media_type="image/jpeg", headers={"Cache-Control": "no-cache"})
 
 
 @app.get("/api/tasks", dependencies=[Depends(auth)])
@@ -967,10 +1005,11 @@ async def face_identify(file: UploadFile = File(...)):
 
 @app.post("/face/enroll", dependencies=[Depends(auth)])
 async def face_enroll(name: str = Form(...), file: UploadFile = File(...)):
-    faces = await asyncio.to_thread(detect_faces, await file.read())
+    data = await file.read()
+    faces = await asyncio.to_thread(detect_faces, data)
     if not faces:
         return JSONResponse({"error": "no face"}, 400)
-    return {"id": create_person(name, faces[0]["emb"]), "name": name}
+    return {"id": create_person(name, faces[0]["emb"], data, faces[0]["bbox"]), "name": name}
 
 
 @app.post("/v1/audio/transcriptions", dependencies=[Depends(auth)])

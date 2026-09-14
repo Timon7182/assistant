@@ -19,7 +19,10 @@
   main { max-width:1100px; margin:0 auto; padding:20px }
   .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:14px 16px; margin-bottom:10px }
   .row { display:flex; gap:14px; align-items:flex-start }
-  .row img { width:96px; height:72px; object-fit:cover; border-radius:6px; background:#000; flex:none }
+  .row img { width:96px; height:72px; object-fit:cover; border-radius:6px; background:#000; flex:none; cursor:zoom-in }
+  .row img.face { width:64px; height:64px; border-radius:50%; object-fit:cover }
+  #lb { position:fixed; inset:0; background:rgba(0,0,0,.85); display:flex; align-items:center; justify-content:center; z-index:100; cursor:zoom-out }
+  #lb img { max-width:96vw; max-height:96vh; border-radius:8px; box-shadow:0 10px 40px rgba(0,0,0,.6) }
   .meta { color:var(--muted); font-size:12px }
   .name { font-weight:600 }
   .badge { display:inline-block; padding:1px 8px; border-radius:999px; font-size:11px; background:var(--line); color:var(--muted); margin-left:6px }
@@ -51,6 +54,7 @@
   <span id="status"></span>
 </header>
 <main id="main"><div class="empty">Загрузка…</div></main>
+<div id="lb" hidden onclick="this.hidden=true"><img id="lbimg" alt=""></div>
 <script>
 const $ = s => document.querySelector(s);
 let tab = 'visits', open = new Set();
@@ -68,7 +72,7 @@ async function render() {
       main.innerHTML = v.length ? v.map(x => `
         <div class="card" data-id="${x.id}">
           <div class="row">
-            <img src="/api/visits/${x.id}/snapshot" onerror="this.style.visibility='hidden'">
+            <img src="/api/visits/${x.id}/snapshot" onerror="this.style.visibility='hidden'" onclick="openImg(this.src)" title="Открыть кадр">
             <div style="flex:1">
               <div><span class="name">${esc(x.name || 'Незнакомец')}</span><span class="badge">${dur(x.started, x.ended)}</span></div>
               <div class="meta">${fmt(x.started)}${x.ended ? ' – ' + x.ended.slice(11, 16) : ''}</div>
@@ -83,7 +87,7 @@ async function render() {
       const p = await api('/api/people');
       main.innerHTML = p.length ? p.map(x => `
         <div class="card">
-          <div class="row"><div style="flex:1">
+          <div class="row"><img class="face" src="/api/people/${x.id}/photo" onerror="this.style.visibility='hidden'" onclick="openImg(this.src)" title="Открыть фото"><div style="flex:1">
             <span class="name" id="n${x.id}">${esc(x.name)}</span>${/^Гость \d+$/.test(x.name) ? '<span class="badge pending">имя не задано</span>' : ''}<span class="badge">${x.visits} визит.</span>
             <button class="btn" style="margin-left:8px" onclick="rename(${x.id}, '${esc(x.name)}')">Имя</button>
             <div class="meta">последний раз ${fmt(x.last_seen)} · знаком с ${fmt(x.created)}</div>
@@ -116,6 +120,8 @@ async function loadVisit(id) {
   el.innerHTML = (v.messages.map(m => `<div class="msg ${m.role}"><span class="t">${m.ts.slice(11, 16)}</span>${esc(m.content)}</div>`).join('') || '<div class="meta">реплик нет</div>')
     + v.actions.map(a => `<div class="act">⚙ ${esc(a.tool)} ${esc(a.args)} → ${esc(a.result)}</div>`).join('');
 }
+function openImg(src) { $('#lbimg').src = src; $('#lb').hidden = false; }
+document.addEventListener('keydown', e => { if (e.key === 'Escape') $('#lb').hidden = true; });
 function toggle(id) { open.has(id) ? open.delete(id) : open.add(id); render(); }
 function rename(id, name) {
   const el = document.getElementById('n' + id); if (!el || el.querySelector('input')) return;
