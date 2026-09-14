@@ -3,6 +3,7 @@
 Edge client connects to /ws/edge?key=API_KEY and sends:
   text frame  {"type":"frame","jpeg":"<base64>"}   ~2 fps
   text        {"type":"text","text":"..."}          debug input without a mic
+  text        {"type":"wake","source":"voice|hotkey","word":"..."}   summon without a face (wake word / hot key)
   binary      int16 PCM mono 16 kHz, 480 samples (30 ms) per message
 Server sends: {"type":"say","text","wav"}, {"type":"heard","text"}, {"type":"status",...}, {"type":"end"}
 
@@ -40,6 +41,8 @@ PIPER_VOICE = os.getenv("PIPER_VOICE", "ru_RU-irina-medium")
 FACE_THRESHOLD = float(os.getenv("FACE_THRESHOLD", "0.45"))
 ASSISTANT_NAME = os.getenv("ASSISTANT_NAME", "Ассистент")
 RETENTION_DAYS = int(os.getenv("RETENTION_DAYS", "90"))
+WAKE_REPLY = os.getenv("WAKE_REPLY", "Слушаю.")   # what to say when summoned by wake word / hot key ("" = silent)
+WAKE_PERSON = os.getenv("WAKE_PERSON", "")       # name of the person who summons it by hot key / wake word (optional)
 DATA = os.getenv("DATA_DIR", "/data")
 SESSION_TIMEOUT = 40      # seconds without a face -> visit closed
 SR = 16000
@@ -325,7 +328,7 @@ async def llm_text(system, user, max_tokens=200, temperature=0.3):
     return r["text"]
 
 
-def system_prompt(person, pending=None):
+def system_prompt(person, pending=None, woken=False):
     p = (f"Ты {ASSISTANT_NAME}, голосовой помощник у входа в офис UCO. Сейчас {datetime.now():%d.%m.%Y %H:%M}. "
          "Отвечай по-русски, коротко (1-3 предложения), дружелюбно, без markdown и без списков: текст будет озвучен. "
          "Если просят что-то передать другому человеку - вызови leave_message. Если просят запомнить/записать - remember. "
@@ -335,6 +338,8 @@ def system_prompt(person, pending=None):
         p += f"\nПеред тобой {person['name']} (визитов: {person['visits']}, последний раз: {(person['last_seen'] or '')[:16]})."
         if facts:
             p += "\nЧто ты знаешь об этом человеке:\n- " + "\n- ".join(facts)
+    elif woken:
+        p += "\nТебя позвали голосом или кнопкой (скорее всего сотрудник офиса), лица в кадре может не быть. Выполняй просьбу, имя не спрашивай."
     else:
         p += "\nЧеловек перед тобой пока незнакомый."
     if pending:
@@ -365,6 +370,10 @@ class Session:
         self.last_jpeg = None
         self.busy = asyncio.Lock()
         self.name_attempts = 0
+        self.wake_ts = 0.0                     # last summon by wake word / hot key
+        self.idle_ring = deque(maxlen=50)
+        self.wake_word = ""
+        self.heard_since_wake = False
 
     async def send(self, obj):
         await self.ws.send_text(json.dumps(obj, ensure_ascii=False))
@@ -413,7 +422,7 @@ class Session:
         self.last_jpeg = jpeg
         faces = await asyncio.to_thread(detect_faces, jpeg)
         if not faces:
-            if (self.person or self.state != "idle") and time.time() - self.last_face_ts > SESSION_TIMEOUT:
+            if (self.person or self.state != "idle" or self.visit_id) and time.time() - self.last_face_ts > SESSION_TIMEOUT:
                 await self.reset("человек ушёл")
             return
         self.last_face_ts = time.time()
@@ -477,14 +486,47 @@ class Session:
         self.history = []
         self.unknown_hits = 0
         self.known_hits = {}
+        self.wake_ts = 0.0
         await self.send({"type": "status", "person": None, "reset": why})
+
+    # ---------------- summon by wake word / hot key (works without a face in the frame)
+    async def on_wake(self, source="voice", word=""):
+        if self.state == "ended":
+            self.state = "idle"
+        self.wake_ts = self.last_face_ts = time.time()
+        self.wake_word = (word or "").strip().lower()
+        self.heard_since_wake = False
+        if self.person is None and WAKE_PERSON:
+            self.person = find_person_by_name(WAKE_PERSON)
+        if not self.visit_id:
+            self.start_visit(self.last_jpeg)
+        log.info("woken by %s (%s) person=%s", source, word, self.person["name"] if self.person else None)
+        for pcm in list(self.idle_ring):       # the command may follow the wake word in one breath
+            self.vad_feed(pcm)
+        self.idle_ring.clear()
+        await self.send({"type": "status", "woken": source, "person": self.person["name"] if self.person else None, "visit": self.visit_id})
+        if WAKE_REPLY:
+            asyncio.create_task(self.wake_ack())
+
+    async def wake_ack(self):
+        # reply only if the person paused after the wake word; if they kept talking, don't speak over them
+        await asyncio.sleep(1.2)
+        if self.in_speech or self.heard_since_wake or self.busy.locked():
+            return
+        async with self.busy:
+            if not self.in_speech and not self.heard_since_wake:
+                await self.say(WAKE_REPLY)
 
     # ---------------- audio
     async def on_audio(self, pcm: bytes):
         if len(pcm) != 960 or self.state == "ended":
             return
         if time.time() - self.last_face_ts > 15:
+            self.idle_ring.append(pcm)         # nobody in front of the camera: keep ~1.5 s in case a wake word follows
             return
+        self.vad_feed(pcm)
+
+    def vad_feed(self, pcm: bytes):
         voiced = self.vad.is_speech(pcm, SR)
         self.ring.append(voiced)
         if not self.in_speech:
@@ -520,6 +562,11 @@ class Session:
             await self.handle_text(text)
 
     async def handle_text(self, text):
+        if self.wake_ts:
+            self.heard_since_wake = True
+            self.last_face_ts = time.time()    # keep the session alive while they keep talking
+            if self.wake_word:
+                text = re.sub(r"^[\W_]*" + re.escape(self.wake_word) + r"[\W_]*", "", text, flags=re.I).strip() or text
         await self.send({"type": "heard", "text": text})
         if self.state == "ended":
             return
@@ -572,7 +619,7 @@ class Session:
         reply = ""
         try:
             for _ in range(4):
-                r = await llm(system_prompt(self.person), self.history[-14:], tools=True)
+                r = await llm(system_prompt(self.person, woken=bool(self.wake_ts)), self.history[-14:], tools=True)
                 self.history.append(r["assistant_msg"])
                 if not r["tool_calls"]:
                     reply = r["text"]
@@ -711,6 +758,8 @@ async def ws_edge(ws: WebSocket):
                     await s.on_frame(base64.b64decode(d["jpeg"]))
                 elif d.get("type") == "text":
                     asyncio.create_task(s.on_text(d["text"]))
+                elif d.get("type") == "wake":
+                    await s.on_wake(d.get("source", "voice"), d.get("word", ""))
     except WebSocketDisconnect:
         pass
     await s.finish_visit("edge disconnected")

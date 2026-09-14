@@ -2,3 +2,5 @@ opencv-python
 sounddevice
 websocket-client
 numpy
+vosk
+keyboard

@@ -9,6 +9,7 @@
 - Инструменты LLM: `leave_message` ("передай Данияру ..."), `remember` ("запиши ..."), `who_visited` ("кто заходил?"), `list_people`, `end_session` ("выключись").
 - Каждый визит: кадр, транскрипт, вызовы инструментов, краткое резюме. Дашборд на `/` (Basic auth).
 - Кадры и транскрипты старше RETENTION_DAYS удаляются.
+- Вызов без лица в кадре: горячая клавиша (`--hotkey ctrl+alt+a`) или слово-активатор (`--wake "ассистент"`, распознаётся офлайн Vosk'ом на клиенте). Сервер отвечает `WAKE_REPLY` ("Слушаю."), если после слова сделать паузу; можно говорить и в одно дыхание: "ассистент, запиши, что ...".
 
 ## Развёртывание (Ubuntu + docker)
     sudo git clone https://github.com/Timon7182/assistant.git /opt/assistant
@@ -33,7 +34,8 @@
 ## Клиент у двери (Windows/Linux, камера + микрофон + колонка)
     cd edge && pip install -r requirements.txt
     python client.py --server ws://HOST:8060/ws/edge --key API_KEY --camera 0 --show
-В консоли клиента можно печатать текст вместо речи (отладка).
+    python client.py --server ws://HOST:8060/ws/edge --key API_KEY --camera 0 --hotkey ctrl+alt+a --wake "ассистент"
+В консоли клиента можно печатать текст вместо речи (отладка), пустая строка = вызов. `--camera -1` без камеры (только голос/кнопка), `--beep` короткий сигнал при вызове, `--mic N --speaker N` выбор устройств (`python -m sounddevice`). Модель для слова-активатора (~45 МБ) скачивается сама при первом запуске в `edge/models/`. Короткие слова-активаторы (одно слово в 2 слога) чаще срабатывают ложно, лучше два слова ("эй помощник").
 
 ## Настройки (.env)
-`WHISPER_MODEL` tiny|base|small|medium, `PIPER_VOICE` ru_RU-irina|dmitri|ruslan|denis-medium, `FACE_THRESHOLD`, `CLAUDE_MODEL` sonnet|opus, `MEM_LIMIT`, `CPU_LIMIT`.
+`WHISPER_MODEL` tiny|base|small|medium, `PIPER_VOICE` ru_RU-irina|dmitri|ruslan|denis-medium, `FACE_THRESHOLD`, `CLAUDE_MODEL` sonnet|opus, `WAKE_REPLY` (ответ на вызов, пусто = молча), `WAKE_PERSON` (чьё имя подставлять при вызове по кнопке/слову), `MEM_LIMIT`, `CPU_LIMIT`.

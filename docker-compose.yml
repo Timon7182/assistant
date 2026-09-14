@@ -22,6 +22,8 @@ services:
       FACE_THRESHOLD: ${FACE_THRESHOLD:-0.45}
       ASSISTANT_NAME: ${ASSISTANT_NAME:-Ассистент UCO}
       RETENTION_DAYS: ${RETENTION_DAYS:-90}
+      WAKE_REPLY: ${WAKE_REPLY-Слушаю.}
+      WAKE_PERSON: ${WAKE_PERSON:-}
       TZ: ${TZ:-Asia/Almaty}
       OMP_NUM_THREADS: ${OMP_THREADS:-4}
     volumes:

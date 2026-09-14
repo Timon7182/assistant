@@ -1,33 +1,50 @@
 """Edge client: webcam + mic + speaker -> door-assistant server.
    pip install -r requirements.txt
-   python client.py --server ws://192.168.88.49:8060/ws/edge --camera 0
+   python client.py --server ws://192.168.88.49:8060/ws/edge --key API_KEY --camera 0
+
+Summoning the assistant without standing in front of the camera:
+   --hotkey ctrl+alt+a        global hot key (default; "" to disable)
+   --wake "ассистент"         wake word/phrase recognised locally by Vosk (offline, light on CPU);
+                              the small Russian model is downloaded on first run (~45 MB)
 """
-import argparse, base64, io, json, threading, time, wave
+import argparse, base64, io, json, os, sys, threading, time, wave, queue
 
 import cv2, numpy as np, sounddevice as sd, websocket
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--server", default="ws://192.168.88.49:8060/ws/edge")
 ap.add_argument("--key", default="", help="API_KEY сервера")
-ap.add_argument("--camera", type=int, default=0)
+ap.add_argument("--camera", type=int, default=0, help="номер камеры; -1 = без камеры (только голос/кнопка)")
 ap.add_argument("--fps", type=float, default=2.0, help="кадров в секунду на сервер")
 ap.add_argument("--mic", default=None, help="индекс/имя микрофона (см. python -m sounddevice)")
 ap.add_argument("--speaker", default=None)
 ap.add_argument("--show", action="store_true", help="показывать окно с камерой")
+ap.add_argument("--hotkey", default="ctrl+alt+a", help="горячая клавиша вызова; '' = выключить")
+ap.add_argument("--wake", default="", help="слово-активатор, например 'ассистент' (распознаётся локально)")
+ap.add_argument("--wake-model", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "models", "vosk-model-small-ru-0.22"))
+ap.add_argument("--beep", action="store_true", help="короткий сигнал при вызове")
 args = ap.parse_args()
 if args.key:
     args.server += ("&" if "?" in args.server else "?") + "key=" + args.key
+args.mic = int(args.mic) if args.mic and args.mic.lstrip("-").isdigit() else args.mic
+args.speaker = int(args.speaker) if args.speaker and args.speaker.lstrip("-").isdigit() else args.speaker
 
 SR = 16000
 CHUNK = 480                                  # 30 мс - то, что ждёт webrtcvad на сервере
 playing = threading.Event()
 send_lock = threading.Lock()
 ws = None
+wake_q = queue.Queue(maxsize=200)
+last_wake = 0.0
+
+
+def connected():
+    return ws is not None and ws.sock is not None and ws.sock.connected
 
 
 def send_text(obj):
     with send_lock:
-        ws.send(json.dumps(obj))
+        ws.send(json.dumps(obj, ensure_ascii=False))
 
 
 def send_bin(b):
@@ -61,13 +78,121 @@ def play_wav(data):
         playing.clear()
 
 
+def beep():
+    t = np.arange(int(SR * 0.12)) / SR
+    tone = (np.sin(2 * np.pi * 880 * t) * 8000 * np.minimum(1, 10 * (0.12 - t))).astype(np.int16)
+    playing.set()
+    try:
+        sd.play(tone, SR, device=args.speaker)
+        sd.wait()
+    finally:
+        playing.clear()
+
+
+def wake(source):
+    """сообщить серверу, что ассистента позвали (без лица в кадре)"""
+    global last_wake
+    if time.time() - last_wake < 3:
+        return
+    last_wake = time.time()
+    print(f"[wake] {source}")
+    if args.beep:
+        threading.Thread(target=beep, daemon=True).start()
+    if connected():
+        try:
+            send_text({"type": "wake", "source": source, "word": args.wake})
+        except Exception as e:
+            print("wake send failed:", e)
+    else:
+        print("not connected to server")
+
+
 def audio_cb(indata, frames, t, status):
-    if playing.is_set() or ws is None or not ws.sock or not ws.sock.connected:
+    if playing.is_set():
+        return
+    b = bytes(indata)
+    if args.wake:
+        try:
+            wake_q.put_nowait(b)
+        except queue.Full:
+            pass
+    if not connected():
         return
     try:
-        send_bin(bytes(indata))
+        send_bin(b)
     except Exception:
         pass
+
+
+# ---------------- wake word (Vosk, offline)
+def ensure_vosk_model(path):
+    if os.path.isdir(path):
+        return path
+    import urllib.request, zipfile
+    name = os.path.basename(path.rstrip("/\\"))
+    url = f"https://alphacephei.com/vosk/models/{name}.zip"
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    zpath = path + ".zip"
+    print(f"downloading wake-word model {url} ...")
+    urllib.request.urlretrieve(url, zpath)
+    with zipfile.ZipFile(zpath) as z:
+        z.extractall(os.path.dirname(path))
+    os.remove(zpath)
+    return path
+
+
+def wake_loop():
+    """Vosk in full-vocabulary mode: a limited grammar gives too many false hits on similar words.
+    Partial results are checked so the phrase is caught ~0.7 s after it is spoken, even mid-sentence."""
+    import re
+    from vosk import Model, KaldiRecognizer, SetLogLevel
+    SetLogLevel(-1)
+    model = Model(ensure_vosk_model(args.wake_model))
+    phrase = args.wake.lower().strip()
+    rx = re.compile(r"(^|\s)" + re.escape(phrase) + r"(\s|$)")
+    rec = KaldiRecognizer(model, SR)
+    print(f"wake word ready: '{phrase}'")
+    buf, silent, active = b"", 0, False
+    while True:
+        chunk = wake_q.get()
+        rms = np.sqrt(np.mean(np.frombuffer(chunk, np.int16).astype(np.float32) ** 2))
+        silent = silent + 1 if rms < 250 else 0
+        if silent > 33:                         # ~1 s of silence: nothing to decode, utterance boundary
+            if active:
+                rec.Reset()
+                active = False
+            buf = b""
+            continue
+        active = True
+        buf += chunk
+        if len(buf) < CHUNK * 2 * 4:            # decode 120 ms at a time
+            continue
+        data, buf = buf, b""
+        try:
+            if rec.AcceptWaveform(data):
+                text = json.loads(rec.Result()).get("text", "")
+            else:
+                text = json.loads(rec.PartialResult()).get("partial", "")
+        except Exception as e:
+            print("vosk error:", e)
+            continue
+        if rx.search(text):
+            rec.Reset()
+            active = False
+            wake("voice")
+
+
+def hotkey_loop():
+    try:
+        import keyboard
+    except ImportError:
+        print("pip install keyboard  -  чтобы работала горячая клавиша")
+        return
+    try:
+        keyboard.add_hotkey(args.hotkey, lambda: wake("hotkey"))
+        print(f"hot key ready: {args.hotkey}")
+    except Exception as e:
+        print("hotkey failed:", e)
 
 
 def camera_loop():
@@ -84,7 +209,7 @@ def camera_loop():
         if args.show:
             cv2.imshow("edge", frame)
             cv2.waitKey(1)
-        if time.time() - last >= period and ws and ws.sock and ws.sock.connected:
+        if time.time() - last >= period and connected():
             last = time.time()
             h, w = frame.shape[:2]
             if w > 960:
@@ -97,18 +222,27 @@ def camera_loop():
 
 
 def stdin_loop():
-    """ввод текста с клавиатуры для отладки без микрофона"""
+    """ввод текста с клавиатуры для отладки без микрофона; пустая строка = вызов"""
     while True:
         try:
             line = input()
         except EOFError:
             return
-        if line.strip() and ws and ws.sock and ws.sock.connected:
+        if not connected():
+            continue
+        if not line.strip():
+            wake("stdin")
+        else:
             send_text({"type": "text", "text": line.strip()})
 
 
-threading.Thread(target=camera_loop, daemon=True).start()
+if args.camera >= 0:
+    threading.Thread(target=camera_loop, daemon=True).start()
 threading.Thread(target=stdin_loop, daemon=True).start()
+if args.wake:
+    threading.Thread(target=wake_loop, daemon=True).start()
+if args.hotkey:
+    hotkey_loop()
 stream = sd.InputStream(samplerate=SR, channels=1, dtype="int16", blocksize=CHUNK, device=args.mic, callback=audio_cb)
 stream.start()
 
