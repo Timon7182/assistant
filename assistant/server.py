@@ -585,10 +585,12 @@ class Session:
 
     async def handle_text(self, text):
         if self.wake_ts:
-            self.heard_since_wake = True
             self.last_face_ts = time.time()    # keep the session alive while they keep talking
             if self.wake_word:
-                text = re.sub(r"^[\W_]*" + re.escape(self.wake_word) + r"[\W_]*", "", text, flags=re.I).strip() or text
+                text = re.sub(r"^[\W_]*" + re.escape(self.wake_word) + r"[\W_]*", "", text, flags=re.I).strip()
+                if len(text) < 2:              # only the wake word itself was heard: wait for the command
+                    return
+            self.heard_since_wake = True
         await self.send({"type": "heard", "text": text})
         if self.state == "ended":
             return

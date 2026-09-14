@@ -49,7 +49,11 @@ def send_text(obj):
 
 def send_bin(b):
     with send_lock:
-        ws.send_binary(b)
+        ws.send(b, websocket.ABNF.OPCODE_BINARY)   # WebSocketApp has no send_binary()
+
+
+sent_frames = 0
+level_warned = False
 
 
 def on_message(_, msg):
@@ -137,10 +141,18 @@ def audio_cb(indata, frames, t, status):
             pass
     if not connected():
         return
+    global sent_frames, level_warned
     try:
         send_bin(b)
-    except Exception:
-        pass
+        sent_frames += 1
+    except Exception as e:
+        if sent_frames % 100 == 0:
+            print("audio send failed:", e)
+    if sent_frames == 200 and not level_warned:                       # ~6 s after connect: is the mic alive?
+        level_warned = True
+        rms = float(np.sqrt(np.mean(np.frombuffer(b, np.int16).astype(np.float32) ** 2)))
+        if rms < 5:
+            print(f"[mic] уровень сигнала ~0 ({rms:.0f}) - проверьте микрофон: python -m sounddevice, затем --mic N")
 
 
 # ---------------- wake word (Vosk, offline)
