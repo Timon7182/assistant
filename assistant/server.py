@@ -242,12 +242,12 @@ def tools_anthropic():
 http = httpx.AsyncClient(timeout=120)
 
 
-async def llm_openai(system, messages, tools=None, max_tokens=300, temperature=0.6):
+async def llm_openai(system, messages, tools=None, max_tokens=300, temperature=0.6, force_tools=False):
     body = {"model": LLM_MODEL, "messages": [{"role": "system", "content": system}] + messages,
             "max_tokens": max_tokens, "temperature": temperature, "chat_template_kwargs": {"enable_thinking": False}}
     if tools:
         body["tools"] = tools_openai()
-        body["tool_choice"] = "auto"
+        body["tool_choice"] = "required" if force_tools else "auto"
     r = await http.post(f"{LLM_URL}/chat/completions", json=body, headers={"Authorization": f"Bearer {LLM_KEY}"})
     r.raise_for_status()
     m = r.json()["choices"][0]["message"]
@@ -297,7 +297,7 @@ def to_anthropic_messages(messages):
 _anthropic_client = None
 
 
-async def llm_anthropic(system, messages, tools=None, max_tokens=300, temperature=0.6):
+async def llm_anthropic(system, messages, tools=None, max_tokens=300, temperature=0.6, force_tools=False):
     global _anthropic_client
     if _anthropic_client is None:
         from anthropic import AsyncAnthropic
@@ -306,6 +306,8 @@ async def llm_anthropic(system, messages, tools=None, max_tokens=300, temperatur
                   messages=to_anthropic_messages(messages), output_config={"effort": "low"})
     if tools:
         kwargs["tools"] = tools_anthropic()
+        if force_tools:
+            kwargs["tool_choice"] = {"type": "any"}
     resp = await _anthropic_client.messages.create(**kwargs)
     if resp.stop_reason == "refusal":
         return {"text": "Извини, на это я ответить не могу.", "tool_calls": [], "assistant_msg": {"role": "assistant", "content": "Извини, на это я ответить не могу."}}
@@ -315,12 +317,22 @@ async def llm_anthropic(system, messages, tools=None, max_tokens=300, temperatur
     return {"text": text, "tool_calls": calls, "assistant_msg": assistant_msg}
 
 
-async def llm(system, messages, tools=None, max_tokens=300, temperature=0.6):
+async def llm(system, messages, tools=None, max_tokens=300, temperature=0.6, force_tools=False):
     if LLM_PROVIDER == "claude-cli":
         import llm_cli
         return await asyncio.to_thread(llm_cli.chat, system, messages, TOOLS if tools else None, max_tokens, temperature)
     fn = llm_anthropic if LLM_PROVIDER == "anthropic" else llm_openai
-    return await fn(system, messages, tools, max_tokens, temperature)
+    return await fn(system, messages, tools, max_tokens, temperature, force_tools)
+
+
+# phrases that must end up as a tool call; small local models sometimes just answer "Записал." without calling anything
+INTENT_WORDS = ("запиши", "запомни", "передай", "напомни", "скажи ему", "скажи ей", "выключ", "отключ", "до свидания", "пока",
+                "кто заходил", "кто приходил", "кто был", "кого ты знаешь", "кого знаешь")
+
+
+def wants_tool(text):
+    t = text.lower()
+    return any(w in t for w in INTENT_WORDS)
 
 
 async def llm_text(system, user, max_tokens=200, temperature=0.3):
@@ -618,8 +630,12 @@ class Session:
         end = False
         reply = ""
         try:
-            for _ in range(4):
-                r = await llm(system_prompt(self.person, woken=bool(self.wake_ts)), self.history[-14:], tools=True)
+            for i in range(4):
+                sysp = system_prompt(self.person, woken=bool(self.wake_ts))
+                r = await llm(sysp, self.history[-14:], tools=True, temperature=0.3)
+                if i == 0 and not r["tool_calls"] and wants_tool(text) and LLM_PROVIDER != "claude-cli":
+                    log.info("no tool call for an obvious command, retrying with tool_choice=required (got %r)", r["text"])
+                    r = await llm(sysp, self.history[-14:], tools=True, temperature=0.1, force_tools=True)
                 self.history.append(r["assistant_msg"])
                 if not r["tool_calls"]:
                     reply = r["text"]
@@ -633,6 +649,7 @@ class Session:
                     break
             else:
                 reply = reply or "Готово."
+            reply = re.sub(r"\[[A-Z_]+\]:?", "", reply).strip()   # stray template artifacts like [ASSISTANT_TURN]:
         except Exception as e:
             log.error("llm failed: %s", e)
             reply = "Извини, у меня проблемы со связью с моделью."
