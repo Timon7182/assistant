@@ -13,7 +13,9 @@
   header h1 { font-size:16px; margin:0 12px 0 0 }
   nav button { background:none; border:none; padding:8px 12px; color:var(--muted); cursor:pointer; border-radius:6px; font-size:14px }
   nav button.active { color:var(--accent); background:color-mix(in srgb, var(--accent) 10%, transparent) }
-  #status { margin-left:auto; color:var(--muted); font-size:12px }
+  #status { color:var(--muted); font-size:12px }
+  #mode { margin-left:auto; font-size:12px; color:var(--muted); cursor:pointer; margin-right:12px }
+  input.rename { font:inherit; padding:2px 6px; border:1px solid var(--accent); border-radius:6px; background:var(--bg); color:var(--text); width:180px }
   main { max-width:1100px; margin:0 auto; padding:20px }
   .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:14px 16px; margin-bottom:10px }
   .row { display:flex; gap:14px; align-items:flex-start }
@@ -45,6 +47,7 @@
     <button data-tab="notes">Заметки</button>
     <button data-tab="actions">Журнал</button>
   </nav>
+  <label id="mode" title="Молчаливый режим: только фиксирует, кто и когда пришёл, с людьми не разговаривает. Вызов по слову/кнопке работает."><input type="checkbox" id="silent" onchange="setSilent(this.checked)"> молчаливый режим</label>
   <span id="status"></span>
 </header>
 <main id="main"><div class="empty">Загрузка…</div></main>
@@ -81,7 +84,8 @@ async function render() {
       main.innerHTML = p.length ? p.map(x => `
         <div class="card">
           <div class="row"><div style="flex:1">
-            <span class="name">${esc(x.name)}</span><span class="badge">${x.visits} визит.</span>
+            <span class="name" id="n${x.id}">${esc(x.name)}</span>${/^Гость \d+$/.test(x.name) ? '<span class="badge pending">имя не задано</span>' : ''}<span class="badge">${x.visits} визит.</span>
+            <button class="btn" style="margin-left:8px" onclick="rename(${x.id}, '${esc(x.name)}')">Имя</button>
             <div class="meta">последний раз ${fmt(x.last_seen)} · знаком с ${fmt(x.created)}</div>
             ${x.facts.length ? '<ul class="facts">' + x.facts.map(f => '<li>' + esc(f) + '</li>').join('') + '</ul>' : '<div class="meta">фактов пока нет</div>'}
           </div>
@@ -113,10 +117,20 @@ async function loadVisit(id) {
     + v.actions.map(a => `<div class="act">⚙ ${esc(a.tool)} ${esc(a.args)} → ${esc(a.result)}</div>`).join('');
 }
 function toggle(id) { open.has(id) ? open.delete(id) : open.add(id); render(); }
+function rename(id, name) {
+  const el = document.getElementById('n' + id); if (!el || el.querySelector('input')) return;
+  el.innerHTML = `<input class="rename" value="${esc(name)}">`;
+  const inp = el.querySelector('input'); inp.focus(); inp.select();
+  const save = async () => { const v = inp.value.trim(); if (v && v !== name) await api('/api/people/' + id, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: v }) }); render(); };
+  inp.onkeydown = e => { if (e.key === 'Enter') save(); if (e.key === 'Escape') render(); };
+  inp.onblur = save;
+}
+async function setSilent(v) { await api('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ silent: v }) }); }
+async function loadSettings() { try { const s = await api('/api/settings'); $('#silent').checked = !!s.silent; } catch (e) {} }
 async function forget(id, name) { if (confirm('Забыть ' + name + '? Лицо и факты будут удалены.')) { await api('/api/people/' + id, { method: 'DELETE' }); render(); } }
 async function addTask(f) { api('/api/tasks', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ to_name: f.to.value, text: f.text.value }) }).then(() => { f.reset(); render(); }); return false; }
 async function setStatus(id, status) { await api('/api/tasks/' + id + '/status', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status }) }); render(); }
-render(); setInterval(render, 7000);
+render(); loadSettings(); setInterval(() => { if (!document.querySelector('input.rename')) { render(); loadSettings(); } }, 7000);
 </script>
 </body>
 </html>

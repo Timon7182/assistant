@@ -93,6 +93,7 @@ with db() as c:
         text TEXT, status TEXT DEFAULT 'pending', created TEXT, delivered_at TEXT);
     CREATE TABLE IF NOT EXISTS notes(id INTEGER PRIMARY KEY, person_id INTEGER, person_name TEXT, text TEXT, created TEXT);
     CREATE TABLE IF NOT EXISTS actions(id INTEGER PRIMARY KEY, visit_id INTEGER, person_id INTEGER, tool TEXT, args TEXT, result TEXT, ts TEXT);
+    CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT);
     """)
     cols = [r["name"] for r in c.execute("PRAGMA table_info(messages)")]
     if "visit_id" not in cols:
@@ -154,6 +155,28 @@ def find_person_by_name(name):
         if r["name"].lower().startswith(name[:4]):
             return r
     return None
+
+
+def setting(key, default=""):
+    r = q("SELECT value FROM settings WHERE key=?", key)
+    return r[0]["value"] if r else default
+
+
+def set_setting(key, value):
+    ex("INSERT INTO settings(key, value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", key, str(value))
+
+
+def silent_mode():
+    """silent = only log who came and when (auto-enrol unknown faces as 'Гость N'), never talk to visitors.
+    Summoning by wake word / hot key still works. Toggle from the dashboard or SILENT=1 in .env."""
+    return setting("silent", os.getenv("SILENT", "0")) in ("1", "true", "yes", "on")
+
+
+def next_guest_name():
+    n = q("SELECT count(*) n FROM persons WHERE name LIKE 'Гость %'")[0]["n"] + 1
+    while q("SELECT 1 FROM persons WHERE name=?", f"Гость {n}"):
+        n += 1
+    return f"Гость {n}"
 
 
 def create_person(name, emb):
@@ -445,6 +468,8 @@ class Session:
         if pid is not None:
             self.unknown_hits = 0
             self.known_hits[pid] = self.known_hits.get(pid, 0) + 1
+            if f["score"] > 0.7:
+                self.pending_emb, self.pending_area = f["emb"], f["area"]
             if (self.person is None or self.person["id"] != pid) and self.known_hits[pid] >= 2:
                 await self.on_known(pid, sim, jpeg)
         else:
@@ -463,9 +488,14 @@ class Session:
         self.history = []
         self.known_hits = {}
         self.start_visit(jpeg)
+        if 0.45 <= sim < 0.65 and self.pending_emb is not None and len(q("SELECT 1 FROM embeddings WHERE person_id=?", pid)) < 8:
+            index.add(pid, self.pending_emb)           # borderline match: remember this view of the face too
+            self.pending_emb = None
         pending = q("SELECT * FROM tasks WHERE status='pending' AND (to_person=? OR lower(to_name)=lower(?))", pid, self.person["name"])
-        log.info("known person %s (%s) sim=%.2f pending=%d", pid, self.person["name"], sim, len(pending))
+        log.info("known person %s (%s) sim=%.2f pending=%d silent=%s", pid, self.person["name"], sim, len(pending), silent_mode())
         await self.send({"type": "status", "person": self.person["name"], "sim": round(sim, 2), "visit": self.visit_id})
+        if silent_mode():
+            return                                    # just log the visit, don't talk
         async with self.busy:
             try:
                 r = await llm(system_prompt(self.person, pending),
@@ -481,6 +511,18 @@ class Session:
                 ex("UPDATE tasks SET status='delivered', delivered_at=? WHERE id=?", now(), t["id"])
 
     async def on_unknown(self):
+        if silent_mode():
+            if self.pending_emb is None:
+                return
+            name = next_guest_name()
+            pid = create_person(name, self.pending_emb)
+            self.person = get_person(pid)
+            self.pending_emb = None
+            self.history = []
+            self.start_visit(self.pending_frame or self.last_jpeg)
+            log.info("silent mode: auto-enrolled unknown face as %s (id %s)", name, pid)
+            await self.send({"type": "status", "person": name, "enrolled": True, "visit": self.visit_id})
+            return
         self.state = "awaiting_name"
         self.name_attempts = 0
         self.start_visit(self.pending_frame or self.last_jpeg)
@@ -533,8 +575,8 @@ class Session:
     async def on_audio(self, pcm: bytes):
         if len(pcm) != 960 or self.state == "ended":
             return
-        if time.time() - self.last_face_ts > 15:
-            self.idle_ring.append(pcm)         # nobody in front of the camera: keep ~1.5 s in case a wake word follows
+        if time.time() - self.last_face_ts > 15 or (silent_mode() and not self.wake_ts):
+            self.idle_ring.append(pcm)         # nobody in front of the camera (or silent mode): keep ~1.5 s in case a wake word follows
             return
         self.vad_feed(pcm)
 
@@ -710,6 +752,7 @@ class Session:
 
     async def end_session(self):
         self.state = "ended"
+        self.wake_ts = 0.0
         await self.finish_visit("завершено по просьбе")
         await self.send({"type": "end"})
         self.person = None
@@ -798,7 +841,8 @@ async def ws_edge(ws: WebSocket):
 @app.get("/health")
 def health():
     return {"ok": True, "persons": q("SELECT count(*) n FROM persons")[0]["n"], "whisper": WHISPER_MODEL, "voice": PIPER_VOICE,
-            "llm": f"{LLM_PROVIDER}: " + (ANTHROPIC_MODEL if LLM_PROVIDER == 'anthropic' else os.getenv('CLAUDE_MODEL', 'sonnet') if LLM_PROVIDER == 'claude-cli' else LLM_URL + ' ' + LLM_MODEL), "auth": bool(API_KEY)}
+            "llm": f"{LLM_PROVIDER}: " + (ANTHROPIC_MODEL if LLM_PROVIDER == 'anthropic' else os.getenv('CLAUDE_MODEL', 'sonnet') if LLM_PROVIDER == 'claude-cli' else LLM_URL + ' ' + LLM_MODEL), "auth": bool(API_KEY),
+            "silent": silent_mode()}
 
 
 @app.get("/api/visits", dependencies=[Depends(auth)])
@@ -826,6 +870,32 @@ def api_snapshot(vid: int):
 @app.get("/api/people", dependencies=[Depends(auth)])
 def api_people():
     return [r | {"facts": json.loads(r["facts"] or "[]")} for r in q("SELECT * FROM persons ORDER BY last_seen DESC")]
+
+
+@app.patch("/api/people/{pid}", dependencies=[Depends(auth)])
+async def api_rename_person(pid: int, req: Request):
+    """{"name": "Данияр"} - give a name to an auto-enrolled 'Гость N' (or rename anyone)"""
+    b = await req.json()
+    name = (b.get("name") or "").strip()
+    if not name or len(name) > 40:
+        raise HTTPException(400, "bad name")
+    ex("UPDATE persons SET name=? WHERE id=?", name, pid)
+    ex("UPDATE tasks SET to_person=? WHERE to_person IS NULL AND lower(to_name)=lower(?)", pid, name)
+    return {"id": pid, "name": name}
+
+
+@app.get("/api/settings", dependencies=[Depends(auth)])
+def api_settings():
+    return {"silent": silent_mode()}
+
+
+@app.post("/api/settings", dependencies=[Depends(auth)])
+async def api_settings_set(req: Request):
+    b = await req.json()
+    if "silent" in b:
+        set_setting("silent", "1" if b["silent"] else "0")
+        log.info("settings: silent=%s", b["silent"])
+    return {"silent": silent_mode()}
 
 
 @app.delete("/api/people/{pid}", dependencies=[Depends(auth)])

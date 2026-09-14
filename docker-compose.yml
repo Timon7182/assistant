@@ -24,6 +24,7 @@ services:
       RETENTION_DAYS: ${RETENTION_DAYS:-90}
       WAKE_REPLY: ${WAKE_REPLY-Слушаю.}
       WAKE_PERSON: ${WAKE_PERSON:-}
+      SILENT: ${SILENT:-0}
       TZ: ${TZ:-Asia/Almaty}
       OMP_NUM_THREADS: ${OMP_THREADS:-4}
     volumes:
