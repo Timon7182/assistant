@@ -54,6 +54,7 @@ def send_bin(b):
 
 sent_frames = 0
 level_warned = False
+peak_level = [0]
 
 
 def on_message(_, msg):
@@ -148,11 +149,12 @@ def audio_cb(indata, frames, t, status):
     except Exception as e:
         if sent_frames % 100 == 0:
             print("audio send failed:", e)
-    if sent_frames == 200 and not level_warned:                       # ~6 s after connect: is the mic alive?
-        level_warned = True
-        rms = float(np.sqrt(np.mean(np.frombuffer(b, np.int16).astype(np.float32) ** 2)))
-        if rms < 5:
-            print(f"[mic] уровень сигнала ~0 ({rms:.0f}) - проверьте микрофон: python -m sounddevice, затем --mic N")
+    if not level_warned:                                              # first ~6 s after connect: is the mic alive?
+        peak_level[0] = max(peak_level[0], int(np.abs(np.frombuffer(b, np.int16)).max()))
+        if sent_frames >= 200:
+            level_warned = True
+            if peak_level[0] < 20:
+                print(f"[mic] сигнала нет (пик {peak_level[0]}) - проверьте микрофон: python -m sounddevice, затем --mic N")
 
 
 # ---------------- wake word (Vosk, offline)
